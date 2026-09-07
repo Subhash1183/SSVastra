@@ -2,10 +2,11 @@
 // Works natively with 0 npm dependencies, zero bundle bloat, and 100% reliability across all devices!
 
 const getFirebaseConfig = () => {
+  const env = (typeof import.meta !== "undefined" && import.meta && import.meta.env) ? import.meta.env : {};
   return {
-    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAeGNFivIcvuYpc5BSfj_HbGw0tSdunERM",
-    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "ssvastra-fdc13",
-    databaseUrl: import.meta.env.VITE_FIREBASE_DATABASE_URL || ""
+    apiKey: env.VITE_FIREBASE_API_KEY || "AIzaSyAeGNFivIcvuYpc5BSfj_HbGw0tSdunERM",
+    projectId: env.VITE_FIREBASE_PROJECT_ID || "ssvastra-fdc13",
+    databaseUrl: env.VITE_FIREBASE_DATABASE_URL || ""
   };
 };
 
