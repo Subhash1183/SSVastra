@@ -91,6 +91,20 @@ export const fetchCloudProducts = async () => {
   const config = getFirebaseConfig();
 
   try {
+    // 1. Try fetching full catalog document first (instant atomic sync across all devices)
+    const catalogUrl = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents/catalog/products_data?${config.apiKey ? `key=${config.apiKey}` : ""}`;
+    const catRes = await fetch(catalogUrl);
+    if (catRes.ok) {
+      const catData = await catRes.json();
+      if (catData.fields && catData.fields.items) {
+        const parsed = fromFirestoreFields(catData.fields);
+        if (Array.isArray(parsed.items)) {
+          return parsed.items;
+        }
+      }
+    }
+
+    // 2. Fallback to querying individual documents in collection
     const url = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents/products?pageSize=300${config.apiKey ? `&key=${config.apiKey}` : ""}`;
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -108,6 +122,37 @@ export const fetchCloudProducts = async () => {
   } catch (err) {
     console.warn("[SS VASTRA Cloud] Failed to fetch products:", err);
     return null;
+  }
+};
+
+export const saveAllProductsToCloud = async (products) => {
+  if (!isFirebaseConfigured() || !Array.isArray(products)) return false;
+  const config = getFirebaseConfig();
+
+  try {
+    const catalogUrl = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents/catalog/products_data?${config.apiKey ? `key=${config.apiKey}` : ""}`;
+    const body = JSON.stringify({
+      fields: {
+        items: {
+          arrayValue: {
+            values: products.map((item) => ({
+              mapValue: { fields: toFirestoreFields(item) }
+            }))
+          }
+        },
+        updatedAt: { stringValue: new Date().toISOString() }
+      }
+    });
+
+    const res = await fetch(catalogUrl, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn("[SS VASTRA Cloud] Failed to save product catalog:", err);
+    return false;
   }
 };
 

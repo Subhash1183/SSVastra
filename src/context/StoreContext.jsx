@@ -7,6 +7,7 @@ import {
   isFirebaseConfigured, 
   fetchCloudProducts, 
   saveProductToCloud, 
+  saveAllProductsToCloud,
   deleteProductFromCloud,
   fetchCloudOrders, 
   saveOrderToCloud, 
@@ -835,11 +836,12 @@ export const StoreProvider = ({ children }) => {
     setProducts((prev) => {
       const next = [newProduct, ...prev];
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
+      if (isFirebaseConfigured()) {
+        saveAllProductsToCloud(next);
+        saveProductToCloud(newProduct);
+      }
       return next;
     });
-    if (isFirebaseConfigured()) {
-      saveProductToCloud(newProduct);
-    }
     showToast(`Product "${newProduct.name}" created successfully!`, "success");
     return newProduct;
   };
@@ -855,8 +857,9 @@ export const StoreProvider = ({ children }) => {
       const next = prev.map((prod) => (prod.id === productId ? { ...prod, ...fields } : prod));
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       const updated = next.find((p) => p.id === productId);
-      if (updated && isFirebaseConfigured()) {
-        saveProductToCloud(updated);
+      if (isFirebaseConfigured()) {
+        saveAllProductsToCloud(next);
+        if (updated) saveProductToCloud(updated);
       }
       return next;
     });
@@ -868,11 +871,12 @@ export const StoreProvider = ({ children }) => {
     setProducts((prev) => {
       const next = prev.filter((prod) => prod.id !== productId);
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
+      if (isFirebaseConfigured()) {
+        saveAllProductsToCloud(next);
+        deleteProductFromCloud(productId);
+      }
       return next;
     });
-    if (isFirebaseConfigured()) {
-      deleteProductFromCloud(productId);
-    }
     showToast("Product removed from catalog", "info");
   };
 
@@ -891,9 +895,11 @@ export const StoreProvider = ({ children }) => {
         }
         return prod;
       });
+      safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       const updated = next.find((p) => p.id === productId);
-      if (updated && isFirebaseConfigured()) {
-        saveProductToCloud(updated);
+      if (isFirebaseConfigured()) {
+        saveAllProductsToCloud(next);
+        if (updated) saveProductToCloud(updated);
       }
       return next;
     });
@@ -903,19 +909,33 @@ export const StoreProvider = ({ children }) => {
   const addCategory = (newCat) => {
     const trimmed = newCat.trim();
     if (!trimmed || settings.categories.includes(trimmed)) return;
-    setSettings((prev) => ({
-      ...prev,
-      categories: [...prev.categories, trimmed]
-    }));
+    setSettings((prev) => {
+      const updated = {
+        ...prev,
+        categories: [...prev.categories, trimmed]
+      };
+      safeSetStorage(STORAGE_KEYS.SETTINGS, updated);
+      if (isFirebaseConfigured()) {
+        saveSettingsToCloud(updated);
+      }
+      return updated;
+    });
     showToast(`Category "${trimmed}" added`, "success");
   };
 
   const deleteCategory = (catToDelete) => {
     if (catToDelete === "All") return;
-    setSettings((prev) => ({
-      ...prev,
-      categories: prev.categories.filter((c) => c !== catToDelete)
-    }));
+    setSettings((prev) => {
+      const updated = {
+        ...prev,
+        categories: prev.categories.filter((c) => c !== catToDelete)
+      };
+      safeSetStorage(STORAGE_KEYS.SETTINGS, updated);
+      if (isFirebaseConfigured()) {
+        saveSettingsToCloud(updated);
+      }
+      return updated;
+    });
     if (activeCategory === catToDelete) {
       setActiveCategory("All");
     }
@@ -1382,6 +1402,7 @@ export const StoreProvider = ({ children }) => {
   const updateSettings = (newSettings) => {
     setSettings((prev) => {
       const merged = { ...prev, ...newSettings };
+      safeSetStorage(STORAGE_KEYS.SETTINGS, merged);
       if (isFirebaseConfigured()) {
         saveSettingsToCloud(merged);
       }
