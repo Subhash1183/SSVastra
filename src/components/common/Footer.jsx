@@ -125,19 +125,20 @@ export const Footer = () => {
               title="Return to Home"
             >
               <div style={{
-                width: "40px",
-                height: "40px",
+                width: "42px",
+                height: "42px",
                 borderRadius: "50%",
                 background: "#ffffff",
-                padding: "2px",
+                padding: 0,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 border: "1.5px solid var(--border-gold-bright)",
-                boxShadow: "0 0 14px rgba(212, 175, 55, 0.3)",
+                boxShadow: "0 0 14px rgba(223, 168, 116, 0.4)",
+                overflow: "hidden",
                 flexShrink: 0
               }}>
-                <img src="/ss-vastra-logo.png" alt="SS Vastra Logo" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                <img src="/ss-vastra-logo.png" alt="SS Vastra Logo" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
               </div>
               <h2 className="font-display" style={{ fontSize: "1.6rem", color: "#ffffff", margin: 0, textTransform: "uppercase", letterSpacing: "0.10em" }}>
                 {settings.brandName || "SS VASTRA"}

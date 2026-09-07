@@ -113,13 +113,13 @@ export const Navbar = () => {
             }}
             title="Return to Home Catalog"
           >
-            {/* Peacock Emblem with crisp golden ring */}
+            {/* Brand Logo Emblem with crisp rose-gold ring */}
             <div style={{
               width: isScrolled ? "clamp(34px, 7vw, 44px)" : "clamp(38px, 8vw, 50px)",
               height: isScrolled ? "clamp(34px, 7vw, 44px)" : "clamp(38px, 8vw, 50px)",
               borderRadius: "50%",
               background: "#ffffff",
-              padding: "2px",
+              padding: 0,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -139,7 +139,7 @@ export const Navbar = () => {
                   width: "100%",
                   height: "100%",
                   borderRadius: "50%",
-                  objectFit: "contain"
+                  objectFit: "cover"
                 }}
               />
             </div>

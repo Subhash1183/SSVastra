@@ -118,19 +118,20 @@ const MainContent = () => {
           }}
         >
           <div style={{
-            width: "64px",
-            height: "64px",
+            width: "68px",
+            height: "68px",
             borderRadius: "50%",
             background: "#ffffff",
-            padding: "4px",
+            padding: "0px",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            boxShadow: "0 0 32px rgba(212, 175, 55, 0.6)",
-            border: "2px solid var(--border-gold-bright)",
+            boxShadow: "0 0 28px rgba(223, 168, 116, 0.6)",
+            border: "2px solid var(--accent-gold)",
+            overflow: "hidden",
             animation: "pulseGlow 2s infinite"
           }}>
-            <img src="/ss-vastra-logo.png" alt="SS Vastra Logo" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+            <img src="/ss-vastra-logo.png" alt="SS Vastra Logo" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
           </div>
           <div className="font-display" style={{ fontSize: "1.4rem", letterSpacing: "0.14em", textTransform: "uppercase", color: "#ffffff" }}>
             {settings.brandName || "SS VASTRA"}
