@@ -3,8 +3,8 @@
 
 const getFirebaseConfig = () => {
   return {
-    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
-    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "",
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAeGNFivIcvuYpc5BSfj_HbGw0tSdunERM",
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "ssvastra-fdc13",
     databaseUrl: import.meta.env.VITE_FIREBASE_DATABASE_URL || ""
   };
 };
