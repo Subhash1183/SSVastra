@@ -1178,7 +1178,7 @@ export const StoreProvider = ({ children }) => {
       return null;
     }
 
-    const orderId = customerData.orderId || generateOrderId("VAN");
+    const orderId = customerData.orderId || generateOrderId("SSV");
 
     const newOrder = {
       id: orderId,
@@ -1219,24 +1219,30 @@ export const StoreProvider = ({ children }) => {
       }
     };
 
-    // 1. Decrement stock for ordered sizes
-    setProducts((prevProducts) =>
-      prevProducts.map((prod) => {
-        const orderItem = cart.find((item) => item.productId === prod.id);
-        if (orderItem) {
-          const currentSizeStock = prod.sizes?.[orderItem.size] ?? 0;
-          const newSizeStock = Math.max(0, currentSizeStock - orderItem.quantity);
+    // 1. Decrement stock for ordered sizes & sync to storage & cloud
+    setProducts((prevProducts) => {
+      const nextProducts = prevProducts.map((prod) => {
+        const orderItems = cart.filter((item) => item.productId === prod.id);
+        if (orderItems.length > 0) {
+          const nextSizes = { ...(prod.sizes || {}) };
+          orderItems.forEach((orderItem) => {
+            const currentSizeStock = nextSizes[orderItem.size] ?? 0;
+            nextSizes[orderItem.size] = Math.max(0, currentSizeStock - orderItem.quantity);
+          });
           return {
             ...prod,
-            sizes: {
-              ...prod.sizes,
-              [orderItem.size]: newSizeStock
-            }
+            sizes: nextSizes
           };
         }
         return prod;
-      })
-    );
+      });
+
+      safeSetStorage(STORAGE_KEYS.PRODUCTS, nextProducts);
+      if (isFirebaseConfigured()) {
+        saveAllProductsToCloud(nextProducts);
+      }
+      return nextProducts;
+    });
 
     // 2. Save order
     const updatedOrder = normalizeOrder(newOrder);
