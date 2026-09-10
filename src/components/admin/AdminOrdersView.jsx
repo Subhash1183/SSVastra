@@ -25,11 +25,13 @@ import {
   Printer,
   Download,
   CheckSquare,
-  Square
+  Square,
+  RefreshCw
 } from "lucide-react";
 
 export const AdminOrdersView = ({ onSelectOrder }) => {
-  const { orders, updateOrderStatus, clearAllOrders, settings, showToast } = useStore();
+  const { orders, updateOrderStatus, clearAllOrders, settings, showToast, refreshCloudData } = useStore();
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterStatus, setFilterStatus] = useState("All");
   const [selectedMonth, setSelectedMonth] = useState("All");
   const [selectedDate, setSelectedDate] = useState(""); // YYYY-MM-DD or ""
@@ -318,6 +320,21 @@ export const AdminOrdersView = ({ onSelectOrder }) => {
     setIsClearModalOpen(true);
   };
 
+  const handleManualRefresh = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      if (refreshCloudData) {
+        await refreshCloudData();
+        showToast("Live orders refreshed from cloud!", "success");
+      }
+    } catch {
+      showToast("Refresh failed. Please check connection.", "error");
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 600);
+    }
+  };
+
   const hasActiveFilters = selectedMonth !== "All" || selectedDate !== "" || filterStatus !== "All" || searchTerm !== "";
 
   const salesOrders = useMemo(() => {
@@ -371,6 +388,28 @@ export const AdminOrdersView = ({ onSelectOrder }) => {
                 {displayOrdersCount} {displayOrdersCount === 1 ? "order" : "orders"}
               </span>
             </div>
+
+            {/* Manual Live Cloud Refresh Button */}
+            <button
+              onClick={handleManualRefresh}
+              disabled={isRefreshing}
+              className="btn btn-secondary btn-sm"
+              style={{
+                height: "34px",
+                padding: "0 12px",
+                fontSize: "0.78rem",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                fontWeight: 700,
+                color: "var(--accent-gold-dark)",
+                borderColor: "var(--border-gold)"
+              }}
+              title="Refresh latest orders and cloud status"
+            >
+              <RefreshCw size={13} className={isRefreshing ? "spin-animation" : ""} />
+              <span>{isRefreshing ? "Syncing..." : "Live Refresh"}</span>
+            </button>
 
             {/* Quick CSV Export Button */}
             <button

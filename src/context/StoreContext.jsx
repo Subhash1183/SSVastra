@@ -1,15 +1,18 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { INITIAL_PRODUCTS, INITIAL_ORDERS, INITIAL_SETTINGS, INITIAL_COUPONS } from "../data/initialData";
 import { generateOrderId, getTotalStock, normalizeImageUrl, FALLBACK_PRODUCT_IMAGE } from "../utils/formatters";
 import { playOrderChime } from "../utils/audio";
 import confetti from "canvas-confetti";
 import { 
   isFirebaseConfigured, 
+  fetchStoreVersion,
+  updateStoreVersionMeta,
+  fetchCloudCatalog, 
+  saveCatalogBundleToCloud,
   fetchCloudProducts, 
-  saveProductToCloud, 
   saveAllProductsToCloud,
-  deleteProductFromCloud,
   fetchCloudOrders, 
+  fetchOrderByIdFromCloud,
   saveOrderToCloud, 
   updateOrderStatusInCloud,
   deleteOrderFromCloud,
@@ -34,15 +37,23 @@ const DEMO_ORDER_IDS = new Set([
 
 const StoreContext = createContext();
 
-const STORAGE_KEYS = {
+export const STORAGE_KEYS = {
   PRODUCTS: "ss_vastra_clothing_products_v3",
   ORDERS: "ss_vastra_clothing_orders_v3",
   SETTINGS: "ss_vastra_clothing_settings_v3",
   CART: "ss_vastra_clothing_cart_v3",
   WISHLIST: "ss_vastra_clothing_wishlist_v3",
   COUPONS: "ss_vastra_clothing_coupons_v3",
-  DELETED_PRODUCT_IDS: "ss_vastra_clothing_deleted_prod_ids_v3"
+  DELETED_PRODUCT_IDS: "ss_vastra_clothing_deleted_prod_ids_v3",
+  STORE_VERSION: "STORE_VERSION",
+  ORDERS_VERSION: "ORDERS_VERSION",
+  SETTINGS_VERSION: "SETTINGS_VERSION"
 };
+
+// Module-level in-memory timestamp throttling window (2.5 minutes)
+const THROTTLE_WINDOW_MS = 150000;
+let lastVersionCheckTimestamp = 0;
+let lastOrdersSyncTimestamp = 0;
 
 const getDeletedProductIds = () => {
   try {
@@ -135,7 +146,7 @@ export const normalizeOrder = (order) => {
 
   return {
     ...order,
-    id: order.id || generateOrderId("VAN"),
+    id: order.id || generateOrderId("SSV"),
     createdAt: order.createdAt || new Date().toISOString(),
     updatedAt: order.updatedAt || order.createdAt || new Date().toISOString(),
     status: order.status || "New",
@@ -191,11 +202,6 @@ export const StoreProvider = ({ children }) => {
             .filter((o) => o && o.id && !DEMO_ORDER_IDS.has(o.id))
             .map(normalizeOrder)
             .filter(Boolean);
-          try {
-            localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(cleaned));
-          } catch {
-            // ignore
-          }
           return cleaned;
         }
       }
@@ -205,13 +211,11 @@ export const StoreProvider = ({ children }) => {
     }
   });
 
-
   const [settings, setSettings] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.SETTINGS);
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Sanitize any legacy cached brand or tagline
         if (!parsed.brandName || parsed.brandName.toUpperCase().includes("VANSHRA")) {
           localStorage.removeItem(STORAGE_KEYS.SETTINGS);
           return INITIAL_SETTINGS;
@@ -310,6 +314,29 @@ export const StoreProvider = ({ children }) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
+  // Safe LocalStorage setter with QuotaExceededError protection & auto-pruning
+  const safeSetStorage = (key, value) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      console.warn(`LocalStorage quota exceeded for key: ${key}. Attempting storage optimization...`, e);
+      try {
+        if (key === STORAGE_KEYS.ORDERS && Array.isArray(value)) {
+          const trimmed = value.slice(0, 30);
+          localStorage.setItem(key, JSON.stringify(trimmed));
+        } else if (key === STORAGE_KEYS.PRODUCTS && Array.isArray(value)) {
+          const trimmed = value.map((p) => ({
+            ...p,
+            images: (p.images || []).slice(0, 2)
+          }));
+          localStorage.setItem(key, JSON.stringify(trimmed));
+        }
+      } catch (innerErr) {
+        console.warn("Storage write fallback failed.", innerErr);
+      }
+    }
+  };
+
   // Comprehensive Centralized SPA Navigation Helpers
   const navigateToHome = () => {
     setCurrentView("store");
@@ -323,7 +350,6 @@ export const StoreProvider = ({ children }) => {
     setSelectedOrderForDetail(null);
     setSearchQuery("");
 
-    // Clear URL hash to pure root
     if (window.location.hash) {
       window.history.pushState(null, "", window.location.pathname);
     }
@@ -376,12 +402,13 @@ export const StoreProvider = ({ children }) => {
       if (window.location.hash !== "#admin") {
         window.history.pushState({ modal: "admin" }, "", "#admin");
       }
+      syncAdminOrders(false);
     } else {
       setIsAdminAuthModalOpen(true);
     }
   };
 
-  // Dedicated Modal Opener and Closer Helpers (Handles URL Hash Cleanly)
+  // Dedicated Modal Opener and Closer Helpers
   const openCart = () => {
     setIsCartOpen(true);
     if (window.location.hash !== "#cart") {
@@ -456,193 +483,84 @@ export const StoreProvider = ({ children }) => {
 
   const closeAdminAuth = () => {
     setIsAdminAuthModalOpen(false);
-    if (window.location.hash === "#admin" && sessionStorage.getItem("ss_vastra_admin_auth") !== "true") {
+    if (window.location.hash === "#admin" && !isAdminAuthenticated) {
       window.history.pushState(null, "", window.location.pathname);
     }
   };
 
-  // Dynamic URL hash, Browser History (Back / Forward / Mobile Swipe Back) & Router Sync
+  // Synchronize Browser History / Hash on Navigation
   useEffect(() => {
-    // 1. Synchronize state with current URL hash
-    const syncFromHash = () => {
+    const handlePopState = () => {
       const hash = window.location.hash;
       if (hash.startsWith("#product-")) {
         const prodId = hash.replace("#product-", "");
         setSelectedProductId(prodId);
-        setCurrentView("store");
-      } else if (hash === "#admin" || window.location.search.includes("admin")) {
+        setIsCartOpen(false);
+        setIsCheckoutOpen(false);
+        setIsQuickViewOpen(false);
+        setIsSizeGuideOpen(false);
+        setIsOrderTrackingOpen(false);
+        setIsAdminAuthModalOpen(false);
+      } else if (hash === "#admin") {
         if (sessionStorage.getItem("ss_vastra_admin_auth") === "true") {
+          setIsAdminAuthenticated(true);
           setCurrentView("admin");
         } else {
           setIsAdminAuthModalOpen(true);
         }
       } else if (hash === "#cart") {
         setIsCartOpen(true);
-      } else if (hash === "#tracking") {
-        setIsOrderTrackingOpen(true);
       } else if (hash === "#checkout") {
         setIsCheckoutOpen(true);
+      } else if (hash === "#quickview") {
+        setIsQuickViewOpen(true);
       } else if (hash === "#sizeguide") {
         setIsSizeGuideOpen(true);
-      } else if (!hash || hash === "#") {
-        setSelectedProductId(null);
-        setCurrentView("store");
-      }
-    };
-
-    syncFromHash();
-
-    // 2. Keyboard shortcuts (Escape to close modals, Ctrl+Shift+A for Admin)
-    const handleKeyDown = (e) => {
-      if (e.key === "Escape") {
-        if (isCheckoutOpen) closeCheckout();
-        else if (isCartOpen) closeCart();
+      } else if (hash === "#tracking") {
+        setIsOrderTrackingOpen(true);
+      } else {
+        if (isCartOpen) closeCart();
+        else if (isCheckoutOpen) closeCheckout();
         else if (isQuickViewOpen) closeQuickView();
         else if (isSizeGuideOpen) closeSizeGuide();
         else if (isOrderTrackingOpen) closeOrderTracking();
         else if (isAdminAuthModalOpen) closeAdminAuth();
-        else if (selectedOrderForDetail) setSelectedOrderForDetail(null);
-        return;
+        else if (selectedProductId) setSelectedProductId(null);
       }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "A" || e.key === "a")) {
-        e.preventDefault();
-        navigateToAdmin();
-      }
-    };
-
-    // 3. Popstate event listener (Browser Back / Mobile Swipe Back Navigation)
-    const handlePopState = () => {
-      const currentHash = window.location.hash;
-
-      // Priority 1: Modals
-      if (isCheckoutOpen) {
-        setIsCheckoutOpen(false);
-        return;
-      }
-      if (isCartOpen) {
-        setIsCartOpen(false);
-        return;
-      }
-      if (isQuickViewOpen) {
-        setIsQuickViewOpen(false);
-        setQuickViewProduct(null);
-        return;
-      }
-      if (isSizeGuideOpen) {
-        setIsSizeGuideOpen(false);
-        return;
-      }
-      if (isOrderTrackingOpen) {
-        setIsOrderTrackingOpen(false);
-        return;
-      }
-      if (isAdminAuthModalOpen) {
-        setIsAdminAuthModalOpen(false);
-        return;
-      }
-      if (selectedOrderForDetail) {
-        setSelectedOrderForDetail(null);
-        return;
-      }
-
-      // Priority 2: Product Detail Page
-      if (selectedProductId && !currentHash.startsWith("#product-")) {
-        setSelectedProductId(null);
-        return;
-      }
-
-      // Priority 3: Admin Layout
-      if (currentView === "admin" && currentHash !== "#admin") {
-        setCurrentView("store");
-        return;
-      }
-
-      // Priority 4: Re-sync state from active URL Hash
-      syncFromHash();
     };
 
     window.addEventListener("popstate", handlePopState);
-    window.addEventListener("hashchange", syncFromHash);
-    window.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      window.removeEventListener("popstate", handlePopState);
-      window.removeEventListener("hashchange", syncFromHash);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
+    return () => window.removeEventListener("popstate", handlePopState);
   }, [
-    isCheckoutOpen,
     isCartOpen,
+    isCheckoutOpen,
     isQuickViewOpen,
     isSizeGuideOpen,
     isOrderTrackingOpen,
     isAdminAuthModalOpen,
-    selectedOrderForDetail,
     selectedProductId,
-    currentView
+    isAdminAuthenticated
   ]);
 
-  // Sync URL hash when modal states change
+  // Initial deep link / hash check on page load
   useEffect(() => {
-    if (selectedProductId) {
-      if (window.location.hash !== `#product-${selectedProductId}`) {
-        window.history.pushState({ modal: "product", id: selectedProductId }, "", `#product-${selectedProductId}`);
+    const hash = window.location.hash;
+    if (hash.startsWith("#product-")) {
+      const prodId = hash.replace("#product-", "");
+      setSelectedProductId(prodId);
+    } else if (hash === "#admin") {
+      if (sessionStorage.getItem("ss_vastra_admin_auth") === "true") {
+        setIsAdminAuthenticated(true);
+        setCurrentView("admin");
+      } else {
+        setIsAdminAuthModalOpen(true);
       }
+    } else if (hash === "#tracking") {
+      setIsOrderTrackingOpen(true);
+    } else if (hash === "#cart") {
+      setIsCartOpen(true);
     }
-  }, [selectedProductId]);
-
-  useEffect(() => {
-    if (isCartOpen && window.location.hash !== "#cart") {
-      window.history.pushState({ modal: "cart" }, "", "#cart");
-    }
-  }, [isCartOpen]);
-
-  useEffect(() => {
-    if (isCheckoutOpen && window.location.hash !== "#checkout") {
-      window.history.pushState({ modal: "checkout" }, "", "#checkout");
-    }
-  }, [isCheckoutOpen]);
-
-  useEffect(() => {
-    if (isQuickViewOpen && window.location.hash !== "#quickview") {
-      window.history.pushState({ modal: "quickview" }, "", "#quickview");
-    }
-  }, [isQuickViewOpen]);
-
-  useEffect(() => {
-    if (isSizeGuideOpen && window.location.hash !== "#sizeguide") {
-      window.history.pushState({ modal: "sizeguide" }, "", "#sizeguide");
-    }
-  }, [isSizeGuideOpen]);
-
-  useEffect(() => {
-    if (isOrderTrackingOpen && window.location.hash !== "#tracking") {
-      window.history.pushState({ modal: "tracking" }, "", "#tracking");
-    }
-  }, [isOrderTrackingOpen]);
-
-  // Safe LocalStorage setter with QuotaExceededError protection & auto-pruning
-  const safeSetStorage = (key, value) => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch (e) {
-      console.warn(`LocalStorage quota exceeded for key: ${key}. Attempting storage optimization...`, e);
-      try {
-        if (key === STORAGE_KEYS.ORDERS && Array.isArray(value)) {
-          const trimmed = value.slice(0, 20);
-          localStorage.setItem(key, JSON.stringify(trimmed));
-        } else if (key === STORAGE_KEYS.PRODUCTS && Array.isArray(value)) {
-          const trimmed = value.map((p) => ({
-            ...p,
-            images: (p.images || []).slice(0, 2)
-          }));
-          localStorage.setItem(key, JSON.stringify(trimmed));
-        }
-      } catch (innerErr) {
-        console.warn("Storage write fallback failed.", innerErr);
-      }
-    }
-  };
+  }, []);
 
   // Sync state to LocalStorage with quota protection
   useEffect(() => {
@@ -669,7 +587,7 @@ export const StoreProvider = ({ children }) => {
     safeSetStorage(STORAGE_KEYS.COUPONS, coupons);
   }, [coupons]);
 
-  // Multi-tab real-time synchronization (instantly reflects admin changes on open customer storefront tabs)
+  // Multi-tab real-time synchronization
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (!e.newValue) return;
@@ -711,113 +629,209 @@ export const StoreProvider = ({ children }) => {
     document.title = title;
   }, [settings.brandName, settings.tagline]);
 
-  // Real-time Cloud Synchronization (Products, Orders, Settings)
+  // ==========================================
+  // Optimized Cloud Database Sync Engine (Patterns #1, #2, #3, #4)
+  // ==========================================
+
+  // Synchronize Storefront Data with Version-Based Caching (0–1 Read for Returning Visitors)
+  const syncWithCloud = async (force = false) => {
+    if (!isFirebaseConfigured()) return;
+    const now = Date.now();
+    
+    // In-Memory Session Throttling: reuse cache within 2.5 minutes unless forced
+    if (!force && now - lastVersionCheckTimestamp < THROTTLE_WINDOW_MS) {
+      return;
+    }
+    lastVersionCheckTimestamp = now;
+
+    try {
+      // Step 1: Version Check (Cost: Exactly 1 Firestore Read)
+      const versionMeta = await fetchStoreVersion();
+      if (!versionMeta) return;
+
+      const localStoreVersion = localStorage.getItem(STORAGE_KEYS.STORE_VERSION) || localStorage.getItem("STORE_VERSION");
+      const localSettingsVersion = localStorage.getItem(STORAGE_KEYS.SETTINGS_VERSION) || localStorage.getItem("SETTINGS_VERSION");
+
+      const currentProductsSaved = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
+      const hasLocalProducts = Boolean(currentProductsSaved && currentProductsSaved !== "[]");
+      
+      // Compare version meta: If matched and local products exist, 0 catalog reads!
+      const shouldFetchCatalog = force || !hasLocalProducts || (versionMeta.productsUpdatedAt && versionMeta.productsUpdatedAt !== localStoreVersion);
+      const shouldFetchSettings = force || (versionMeta.settingsUpdatedAt && versionMeta.settingsUpdatedAt !== localSettingsVersion);
+
+      const fetchPromises = [];
+      if (shouldFetchCatalog) {
+        fetchPromises.push(fetchCloudCatalog());
+      } else {
+        fetchPromises.push(Promise.resolve(null));
+      }
+
+      if (shouldFetchSettings) {
+        fetchPromises.push(fetchCloudSettings());
+      } else {
+        fetchPromises.push(Promise.resolve(null));
+      }
+
+      const [cloudProducts, cloudSettings] = await Promise.all(fetchPromises);
+
+      // Update Catalog if fetched
+      if (cloudProducts && Array.isArray(cloudProducts) && cloudProducts.length > 0) {
+        setProducts((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudProducts)) return prev;
+          safeSetStorage(STORAGE_KEYS.PRODUCTS, cloudProducts);
+          return cloudProducts;
+        });
+        if (versionMeta.productsUpdatedAt) {
+          localStorage.setItem(STORAGE_KEYS.STORE_VERSION, versionMeta.productsUpdatedAt);
+          localStorage.setItem("STORE_VERSION", versionMeta.productsUpdatedAt);
+        }
+      }
+
+      // Update Settings if fetched
+      if (cloudSettings && Object.keys(cloudSettings).length > 0) {
+        setSettings((prev) => {
+          const merged = { ...prev, ...cloudSettings };
+          if (JSON.stringify(prev) === JSON.stringify(merged)) return prev;
+          safeSetStorage(STORAGE_KEYS.SETTINGS, merged);
+          return merged;
+        });
+        if (versionMeta.settingsUpdatedAt) {
+          localStorage.setItem(STORAGE_KEYS.SETTINGS_VERSION, versionMeta.settingsUpdatedAt);
+          localStorage.setItem("SETTINGS_VERSION", versionMeta.settingsUpdatedAt);
+        }
+      }
+
+      // If Admin is currently active, sync orders with versioning
+      if (isAdminAuthenticated || currentView === "admin") {
+        await syncAdminOrders(force, versionMeta);
+      }
+    } catch (err) {
+      console.warn("[SS VASTRA Cloud Sync]", err);
+    }
+  };
+
+  // Synchronize Admin Orders (Pattern #4: 98% Order Read Reduction)
+  const syncAdminOrders = async (force = false, existingVersionMeta = null) => {
+    if (!isFirebaseConfigured()) return;
+    const now = Date.now();
+
+    if (!force && now - lastOrdersSyncTimestamp < THROTTLE_WINDOW_MS) {
+      return;
+    }
+    lastOrdersSyncTimestamp = now;
+
+    try {
+      const versionMeta = existingVersionMeta || await fetchStoreVersion();
+      const localOrdersVersion = localStorage.getItem(STORAGE_KEYS.ORDERS_VERSION) || localStorage.getItem("ORDERS_VERSION");
+      const currentOrdersSaved = localStorage.getItem(STORAGE_KEYS.ORDERS);
+      const hasLocalOrders = Boolean(currentOrdersSaved && currentOrdersSaved !== "[]");
+
+      const shouldFetchOrders = force || !hasLocalOrders || (versionMeta?.ordersUpdatedAt && versionMeta.ordersUpdatedAt !== localOrdersVersion);
+
+      if (!shouldFetchOrders) {
+        // 0 Reads: Orders haven't changed in cloud, render instantly from localStorage!
+        return;
+      }
+
+      // Fetch capped recent orders (pageSize=30)
+      const cloudOrders = await fetchCloudOrders(30);
+      if (cloudOrders && Array.isArray(cloudOrders)) {
+        const normalizedCloud = cloudOrders
+          .filter((o) => o && o.id && !DEMO_ORDER_IDS.has(o.id))
+          .map(normalizeOrder)
+          .filter(Boolean);
+
+        setOrders((prev) => {
+          const prevMap = new Map(prev.map((o) => [o.id, o]));
+          const resolvedOrders = normalizedCloud.map((cloudOrd) => {
+            const localOrd = prevMap.get(cloudOrd.id);
+            if (!localOrd) return cloudOrd;
+
+            const localTime = new Date(localOrd.updatedAt || localOrd.createdAt || 0).getTime();
+            const cloudTime = new Date(cloudOrd.updatedAt || cloudOrd.createdAt || 0).getTime();
+
+            if (localTime > cloudTime) {
+              return localOrd;
+            }
+            return cloudOrd;
+          });
+
+          // Preserve any existing local orders outside recent 30-item window
+          const cloudIdSet = new Set(normalizedCloud.map((o) => o.id));
+          prev.forEach((localOrd) => {
+            if (!cloudIdSet.has(localOrd.id) && !DEMO_ORDER_IDS.has(localOrd.id)) {
+              resolvedOrders.push(localOrd);
+            }
+          });
+
+          const sorted = resolvedOrders.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+          if (JSON.stringify(prev) === JSON.stringify(sorted)) return prev;
+          safeSetStorage(STORAGE_KEYS.ORDERS, sorted);
+          return sorted;
+        });
+
+        setSelectedOrderForDetail((curr) => {
+          if (!curr) return null;
+          const match = normalizedCloud.find((o) => o.id === curr.id);
+          if (!match) return curr;
+          const currTime = new Date(curr.updatedAt || curr.createdAt || 0).getTime();
+          const matchTime = new Date(match.updatedAt || match.createdAt || 0).getTime();
+          return currTime > matchTime ? curr : match;
+        });
+
+        if (versionMeta?.ordersUpdatedAt) {
+          localStorage.setItem(STORAGE_KEYS.ORDERS_VERSION, versionMeta.ordersUpdatedAt);
+          localStorage.setItem("ORDERS_VERSION", versionMeta.ordersUpdatedAt);
+        }
+      }
+    } catch (err) {
+      console.warn("[SS VASTRA Cloud Orders Sync]", err);
+    }
+  };
+
+  // Initial Mount & Visibility/Focus Sync
   useEffect(() => {
     if (!isFirebaseConfigured()) return;
 
-    let isMounted = true;
-    const syncWithCloud = async () => {
-      try {
-        const [cloudProducts, cloudOrders, cloudSettings] = await Promise.all([
-          fetchCloudProducts(),
-          fetchCloudOrders(),
-          fetchCloudSettings()
-        ]);
+    // 1. Initial version check on mount
+    syncWithCloud(false);
 
-        if (!isMounted) return;
-
-        if (cloudProducts && Array.isArray(cloudProducts)) {
-          setProducts((prev) => {
-            if (JSON.stringify(prev) === JSON.stringify(cloudProducts)) return prev;
-            safeSetStorage(STORAGE_KEYS.PRODUCTS, cloudProducts);
-            return cloudProducts;
-          });
-        }
-
-        if (cloudOrders && Array.isArray(cloudOrders)) {
-          const normalizedCloud = cloudOrders
-            .filter((o) => o && o.id && !DEMO_ORDER_IDS.has(o.id))
-            .map(normalizeOrder)
-            .filter(Boolean);
-
-          setOrders((prev) => {
-            const prevMap = new Map(prev.map((o) => [o.id, o]));
-            const resolvedOrders = normalizedCloud.map((cloudOrd) => {
-              const localOrd = prevMap.get(cloudOrd.id);
-              if (!localOrd) return cloudOrd;
-
-              const localTime = new Date(localOrd.updatedAt || localOrd.createdAt || 0).getTime();
-              const cloudTime = new Date(cloudOrd.updatedAt || cloudOrd.createdAt || 0).getTime();
-
-              // If local state was updated more recently or equal, keep local version
-              if (localTime > cloudTime) {
-                return localOrd;
-              }
-              return cloudOrd;
-            });
-
-            // Keep local-only orders that haven't synced to cloud yet
-            const cloudIdSet = new Set(normalizedCloud.map((o) => o.id));
-            prev.forEach((localOrd) => {
-              if (!cloudIdSet.has(localOrd.id) && !DEMO_ORDER_IDS.has(localOrd.id)) {
-                resolvedOrders.push(localOrd);
-              }
-            });
-
-            const sorted = resolvedOrders.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-
-            if (JSON.stringify(prev) === JSON.stringify(sorted)) return prev;
-            safeSetStorage(STORAGE_KEYS.ORDERS, sorted);
-            return sorted;
-          });
-
-          setSelectedOrderForDetail((curr) => {
-            if (!curr) return null;
-            const match = normalizedCloud.find((o) => o.id === curr.id);
-            if (!match) return curr;
-            const currTime = new Date(curr.updatedAt || curr.createdAt || 0).getTime();
-            const matchTime = new Date(match.updatedAt || match.createdAt || 0).getTime();
-            return currTime > matchTime ? curr : match;
-          });
-        }
-
-        if (cloudSettings && Object.keys(cloudSettings).length > 0) {
-          setSettings((prev) => {
-            const merged = { ...prev, ...cloudSettings };
-            if (JSON.stringify(prev) === JSON.stringify(merged)) return prev;
-            safeSetStorage(STORAGE_KEYS.SETTINGS, merged);
-            return merged;
-          });
-        }
-      } catch (err) {
-        console.warn("[SS VASTRA Cloud Sync]", err);
+    // 2. Poll interval for active visible tab (throttled to 2.5 minutes)
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        syncWithCloud(false);
       }
-    };
+    }, THROTTLE_WINDOW_MS);
 
-    // Instant initial sync on page load
-    syncWithCloud();
-
-    // 3-second live polling interval for instant multi-device updates
-    const interval = setInterval(syncWithCloud, 3000);
-
-    // Sync immediately whenever user switches tabs or focuses window
+    // 3. Tab focus / visibility change
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        syncWithCloud();
+        syncWithCloud(false);
       }
     };
-    window.addEventListener("focus", syncWithCloud);
+    const handleFocus = () => syncWithCloud(false);
+
+    window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      isMounted = false;
       clearInterval(interval);
-      window.removeEventListener("focus", syncWithCloud);
+      window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 
-  // ==================== PRODUCT ACTIONS ====================
+  // Sync Admin Orders whenever Admin panel is active
+  useEffect(() => {
+    if (isAdminAuthenticated || currentView === "admin") {
+      syncAdminOrders(false);
+    }
+  }, [currentView, adminTab, isAdminAuthenticated]);
+
+  // ==========================================
+  // Streamlined Single-Source Writes (Pattern #5)
+  // ==========================================
 
   const addProduct = (productData) => {
     const cleanedImages = Array.isArray(productData.images)
@@ -837,8 +851,7 @@ export const StoreProvider = ({ children }) => {
       const next = [newProduct, ...prev];
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       if (isFirebaseConfigured()) {
-        saveAllProductsToCloud(next);
-        saveProductToCloud(newProduct);
+        saveCatalogBundleToCloud(next);
       }
       return next;
     });
@@ -856,10 +869,8 @@ export const StoreProvider = ({ children }) => {
     setProducts((prev) => {
       const next = prev.map((prod) => (prod.id === productId ? { ...prod, ...fields } : prod));
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
-      const updated = next.find((p) => p.id === productId);
       if (isFirebaseConfigured()) {
-        saveAllProductsToCloud(next);
-        if (updated) saveProductToCloud(updated);
+        saveCatalogBundleToCloud(next);
       }
       return next;
     });
@@ -872,8 +883,7 @@ export const StoreProvider = ({ children }) => {
       const next = prev.filter((prod) => prod.id !== productId);
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       if (isFirebaseConfigured()) {
-        saveAllProductsToCloud(next);
-        deleteProductFromCloud(productId);
+        saveCatalogBundleToCloud(next);
       }
       return next;
     });
@@ -896,10 +906,8 @@ export const StoreProvider = ({ children }) => {
         return prod;
       });
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
-      const updated = next.find((p) => p.id === productId);
       if (isFirebaseConfigured()) {
-        saveAllProductsToCloud(next);
-        if (updated) saveProductToCloud(updated);
+        saveCatalogBundleToCloud(next);
       }
       return next;
     });
@@ -1046,7 +1054,6 @@ export const StoreProvider = ({ children }) => {
       })()
     : 0;
 
-  // Auto-remove appliedCoupon if cart becomes empty or falls below threshold
   useEffect(() => {
     if (appliedCoupon && cartSubtotal > 0 && cartSubtotal < (appliedCoupon.minOrder || 0)) {
       showToast(`Coupon "${appliedCoupon.code}" removed: Minimum order of ₹${appliedCoupon.minOrder} required`, "warning");
@@ -1170,7 +1177,7 @@ export const StoreProvider = ({ children }) => {
     );
   };
 
-  // ==================== ORDER ACTIONS ====================
+  // ==================== ORDER ACTIONS (2 Writes per Order) ====================
 
   const placeOrder = (customerData) => {
     if (cart.length === 0) {
@@ -1219,7 +1226,7 @@ export const StoreProvider = ({ children }) => {
       }
     };
 
-    // 1. Decrement stock for ordered sizes & sync to storage & cloud
+    // 1. Decrement stock in catalog bundle (Write #1)
     setProducts((prevProducts) => {
       const nextProducts = prevProducts.map((prod) => {
         const orderItems = cart.filter((item) => item.productId === prod.id);
@@ -1239,12 +1246,12 @@ export const StoreProvider = ({ children }) => {
 
       safeSetStorage(STORAGE_KEYS.PRODUCTS, nextProducts);
       if (isFirebaseConfigured()) {
-        saveAllProductsToCloud(nextProducts);
+        saveCatalogBundleToCloud(nextProducts);
       }
       return nextProducts;
     });
 
-    // 2. Save order
+    // 2. Save order to cloud and storage (Write #2)
     const updatedOrder = normalizeOrder(newOrder);
     setOrders((prev) => {
       const nextOrders = [updatedOrder, ...prev.filter((o) => o.id !== updatedOrder.id)];
@@ -1266,7 +1273,7 @@ export const StoreProvider = ({ children }) => {
     setIsCheckoutOpen(false);
     setIsCartOpen(false);
 
-    // 4. Play audio chime and trigger celebration
+    // 5. Play audio chime and trigger celebration
     playOrderChime();
     try {
       confetti({
@@ -1311,13 +1318,9 @@ export const StoreProvider = ({ children }) => {
 
       if (isFirebaseConfigured()) {
         try {
-          const success = await saveOrderToCloud(updatedOrderObj);
-          if (!success) {
-            await updateOrderStatusInCloud(orderId, newStatus, nowIso);
-          }
+          await updateOrderStatusInCloud(orderId, newStatus, nowIso);
         } catch (err) {
           console.warn("[SS VASTRA Cloud] updateOrderStatus error:", err);
-          await updateOrderStatusInCloud(orderId, newStatus, nowIso);
         }
       }
     }
@@ -1364,6 +1367,7 @@ export const StoreProvider = ({ children }) => {
       if (window.location.hash !== "#admin") {
         window.history.pushState({ modal: "admin" }, "", "#admin");
       }
+      syncAdminOrders(false);
       return true;
     }
     return false;
@@ -1400,6 +1404,7 @@ export const StoreProvider = ({ children }) => {
   const openAdminLogin = () => {
     if (isAdminAuthenticated) {
       setCurrentView("admin");
+      syncAdminOrders(false);
     } else {
       setIsAdminAuthModalOpen(true);
     }
@@ -1441,12 +1446,18 @@ export const StoreProvider = ({ children }) => {
     try {
       if (jsonData.products && Array.isArray(jsonData.products)) {
         setProducts(jsonData.products);
+        if (isFirebaseConfigured()) {
+          saveCatalogBundleToCloud(jsonData.products);
+        }
       }
       if (jsonData.orders && Array.isArray(jsonData.orders)) {
         setOrders(jsonData.orders);
       }
       if (jsonData.settings && typeof jsonData.settings === "object") {
         setSettings(jsonData.settings);
+        if (isFirebaseConfigured()) {
+          saveSettingsToCloud(jsonData.settings);
+        }
       }
       showToast("Store data successfully imported & restored!", "success");
       return true;
@@ -1459,11 +1470,15 @@ export const StoreProvider = ({ children }) => {
   const resetToDemoData = () => {
     try {
       localStorage.removeItem(STORAGE_KEYS.DELETED_PRODUCT_IDS);
+      localStorage.removeItem(STORAGE_KEYS.STORE_VERSION);
+      localStorage.removeItem("STORE_VERSION");
+      localStorage.removeItem(STORAGE_KEYS.ORDERS_VERSION);
+      localStorage.removeItem("ORDERS_VERSION");
     } catch {}
     setProducts(INITIAL_PRODUCTS);
     safeSetStorage(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
     if (isFirebaseConfigured()) {
-      INITIAL_PRODUCTS.forEach((p) => saveProductToCloud(p));
+      saveCatalogBundleToCloud(INITIAL_PRODUCTS);
     }
     setOrders(INITIAL_ORDERS);
     safeSetStorage(STORAGE_KEYS.ORDERS, INITIAL_ORDERS);
@@ -1476,7 +1491,6 @@ export const StoreProvider = ({ children }) => {
   // Computed metrics for Admin Dashboard
   const confirmedList = orders.filter((o) => ["Confirmed", "Dispatched", "Delivered"].includes(o.status));
   const metrics = {
-    // Total Sales strictly sums Confirmed, Dispatched, and Delivered orders
     totalRevenue: confirmedList.reduce((sum, o) => sum + (Number(o.total) || 0), 0),
     confirmedUnitsSold: confirmedList.reduce((sum, o) => sum + (o.items?.reduce((iSum, i) => iSum + (Number(i.quantity) || 1), 0) || 0), 0),
     confirmedOrdersCount: confirmedList.length,
@@ -1594,6 +1608,9 @@ export const StoreProvider = ({ children }) => {
         exportStoreData,
         importStoreData,
         resetToDemoData,
+        refreshCloudData: (force = true) => syncWithCloud(force),
+        syncAdminOrders: (force = true) => syncAdminOrders(force),
+        fetchOrderById: (orderId) => fetchOrderByIdFromCloud(orderId),
         // Toast
         toasts,
         showToast,

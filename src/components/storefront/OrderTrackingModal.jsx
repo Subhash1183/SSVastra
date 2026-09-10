@@ -1,34 +1,64 @@
 import React, { useState } from "react";
-import { useStore } from "../../context/StoreContext";
+import { useStore, normalizeOrder } from "../../context/StoreContext";
 import { formatCurrency } from "../../utils/formatters";
 import { 
   X, 
   Search, 
   Truck, 
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from "lucide-react";
 
 export const OrderTrackingModal = () => {
-  const { isOrderTrackingOpen, closeOrderTracking, orders, settings } = useStore();
+  const { isOrderTrackingOpen, closeOrderTracking, orders, settings, fetchOrderById } = useStore();
   const [searchInput, setSearchInput] = useState("");
   const [searchedOrder, setSearchedOrder] = useState(null);
   const [searchAttempted, setSearchAttempted] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   if (!isOrderTrackingOpen) return null;
 
-  const handleSearch = (e) => {
+  const handleSearch = async (e) => {
     e.preventDefault();
-    const query = searchInput.trim().toUpperCase();
+    const query = searchInput.trim();
     if (!query) return;
 
     setSearchAttempted(true);
-    const found = orders.find(
+    const upperQuery = query.toUpperCase();
+
+    // 1. Check local memory/cache first
+    let found = orders.find(
       (o) =>
-        o.id?.toUpperCase() === query ||
+        o.id?.toUpperCase() === upperQuery ||
         (o.customer?.phone && o.customer.phone.replace(/[^0-9]/g, "").includes(query.replace(/[^0-9]/g, ""))) ||
-        (o.customer?.email && o.customer.email.toLowerCase() === searchInput.trim().toLowerCase())
+        (o.customer?.email && o.customer.email.toLowerCase() === query.toLowerCase())
     );
-    setSearchedOrder(found || null);
+
+    if (found) {
+      setSearchedOrder(found);
+      return;
+    }
+
+    // 2. Targeted Single-Document Lookup from Cloud (Cost: Exactly 1 Read)
+    if (fetchOrderById) {
+      setIsLoading(true);
+      try {
+        const cloudDoc = await fetchOrderById(upperQuery);
+        if (cloudDoc) {
+          const normalized = normalizeOrder(cloudDoc);
+          setSearchedOrder(normalized);
+        } else {
+          setSearchedOrder(null);
+        }
+      } catch (err) {
+        console.warn("[OrderTracking] Single-doc lookup error:", err);
+        setSearchedOrder(null);
+      } finally {
+        setIsLoading(false);
+      }
+    } else {
+      setSearchedOrder(null);
+    }
   };
 
   const getStatusStepIndex = (status) => {
@@ -98,7 +128,7 @@ export const OrderTrackingModal = () => {
               <Search size={15} style={{ position: "absolute", left: "12px", top: "12px", color: "var(--text-muted)" }} />
               <input
                 type="text"
-                placeholder="Order ID (e.g. VAN-1001) or Phone"
+                placeholder="Order ID (e.g. SSV-1001) or Phone"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 className="input-field"
@@ -106,13 +136,24 @@ export const OrderTrackingModal = () => {
                 autoFocus
               />
             </div>
-            <button type="submit" className="btn btn-gold" style={{ padding: "8px 20px" }}>
-              Track
+            <button 
+              type="submit" 
+              className="btn btn-gold" 
+              disabled={isLoading}
+              style={{ padding: "8px 20px", display: "flex", alignItems: "center", gap: "6px" }}
+            >
+              {isLoading && <Loader2 size={15} className="spin-animation" />}
+              <span>{isLoading ? "Searching..." : "Track"}</span>
             </button>
           </form>
 
           {/* Search Results */}
-          {searchedOrder ? (
+          {isLoading ? (
+            <div style={{ textAlign: "center", padding: "32px 10px", color: "var(--text-muted)" }}>
+              <Loader2 size={28} className="spin-animation" style={{ margin: "0 auto 10px", color: "var(--accent-gold)" }} />
+              <p style={{ fontSize: "0.85rem" }}>Locating order in cloud database...</p>
+            </div>
+          ) : searchedOrder ? (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               
               {/* Order Status Card */}
@@ -131,7 +172,7 @@ export const OrderTrackingModal = () => {
                       #{searchedOrder.id}
                     </h4>
                   </div>
-                  <span className={`badge badge-${searchedOrder.status.toLowerCase()}`}>
+                  <span className={`badge badge-${(searchedOrder.status || "new").toLowerCase()}`}>
                     {searchedOrder.status}
                   </span>
                 </div>
@@ -197,15 +238,17 @@ export const OrderTrackingModal = () => {
                   Garments in this Order
                 </h5>
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  {searchedOrder.items.map((item, idx) => (
+                  {(searchedOrder.items || []).map((item, idx) => (
                     <div key={idx} style={{ display: "flex", gap: "8px", alignItems: "center", padding: "8px 10px", background: "var(--bg-surface)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-                      <img src={item.image} alt={item.name} style={{ width: "32px", height: "40px", objectFit: "cover", borderRadius: "var(--radius-xs)", flexShrink: 0 }} />
+                      {item.image && (
+                        <img src={item.image} alt={item.name || "Product"} style={{ width: "32px", height: "40px", objectFit: "cover", borderRadius: "var(--radius-xs)", flexShrink: 0 }} />
+                      )}
                       <div style={{ flex: 1, fontSize: "0.78rem", minWidth: 0 }}>
                         <div style={{ fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
                         <div style={{ color: "var(--text-muted)", fontSize: "0.70rem" }}>Size: {item.size} • Qty: {item.quantity}</div>
                       </div>
                       <div style={{ fontWeight: 700, fontSize: "0.82rem", color: "var(--accent-gold-dark)", flexShrink: 0 }}>
-                        {formatCurrency(item.price * item.quantity, settings.currencySymbol)}
+                        {formatCurrency((item.price || 0) * (item.quantity || 1), settings.currencySymbol)}
                       </div>
                     </div>
                   ))}
