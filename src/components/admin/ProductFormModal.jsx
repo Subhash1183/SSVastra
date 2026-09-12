@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useStore } from "../../context/StoreContext";
 import { STANDARD_SIZES } from "../../data/initialData";
 import { compressImage, normalizeImageUrl, FALLBACK_PRODUCT_IMAGE } from "../../utils/formatters";
+import { uploadProductPhotoToCloud } from "../../services/imageUpload";
 import { 
   X, 
   Plus, 
@@ -14,7 +15,9 @@ import {
   Layers,
   DollarSign,
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  Cloud,
+  Loader2
 } from "lucide-react";
 
 export const ProductFormModal = ({ product, isOpen, onClose }) => {
@@ -48,6 +51,7 @@ export const ProductFormModal = ({ product, isOpen, onClose }) => {
 
   const [newCatInput, setNewCatInput] = useState("");
   const [showNewCatInput, setShowNewCatInput] = useState(false);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
 
   useEffect(() => {
     if (product) {
@@ -118,28 +122,49 @@ export const ProductFormModal = ({ product, isOpen, onClose }) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
 
-    showToast("Optimizing photo for cloud storage...", "info", 2000);
-    const compressedImages = [];
+    setIsUploadingPhoto(true);
+    showToast(`Compressing & uploading ${files.length} photo(s)...`, "info", 2500);
+
+    const uploadedUrls = [];
+    let cloudCount = 0;
+    let fallbackCount = 0;
+
     for (const file of files) {
       try {
-        const compressed = await compressImage(file);
-        if (compressed) {
-          compressedImages.push(compressed);
+        const result = await uploadProductPhotoToCloud(file, { folder: "ss_vastra_products" });
+        if (result && result.url) {
+          uploadedUrls.push(result.url);
+          if (result.isCloud) {
+            cloudCount++;
+          } else {
+            fallbackCount++;
+          }
         }
       } catch (err) {
-        console.warn("Compression fallback:", err);
+        console.warn("Photo upload error:", err);
       }
     }
 
-    if (compressedImages.length > 0) {
+    setIsUploadingPhoto(false);
+
+    if (uploadedUrls.length > 0) {
       setFormData((prev) => {
-        const existing = prev.images.filter((img) => img.trim() !== "");
+        const existing = prev.images.filter((img) => img && img.trim() !== "");
         return {
           ...prev,
-          images: existing.length === 0 ? compressedImages : [...existing, ...compressedImages]
+          images: existing.length === 0 ? uploadedUrls : [...existing, ...uploadedUrls]
         };
       });
-      showToast("Photo uploaded & compressed successfully!", "success", 2500);
+
+      if (cloudCount > 0 && fallbackCount === 0) {
+        showToast(`Uploaded ${cloudCount} photo(s) to Cloudinary CDN!`, "success", 3000);
+      } else if (fallbackCount > 0 && cloudCount === 0) {
+        showToast(`Saved ${fallbackCount} photo(s) with local canvas compression.`, "warning", 3500);
+      } else {
+        showToast(`Uploaded ${uploadedUrls.length} photo(s) (${cloudCount} Cloud CDN, ${fallbackCount} Local)`, "success", 3000);
+      }
+    } else {
+      showToast("Failed to process photo(s). Please try again.", "error", 3000);
     }
     e.target.value = "";
   };
@@ -470,54 +495,126 @@ export const ProductFormModal = ({ product, isOpen, onClose }) => {
                 <ImageIcon size={16} />
                 <span>Product Photos (URLs or Upload)</span>
               </span>
-              <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer", padding: "4px 10px", fontSize: "0.75rem" }}>
-                <Upload size={13} />
-                <span>Upload From Device</span>
-                <input type="file" accept="image/*" multiple onChange={handleFileUpload} style={{ display: "none" }} />
+              <label 
+                className="btn btn-secondary btn-sm" 
+                style={{ 
+                  cursor: isUploadingPhoto ? "not-allowed" : "pointer", 
+                  padding: "4px 10px", 
+                  fontSize: "0.75rem",
+                  opacity: isUploadingPhoto ? 0.7 : 1,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px"
+                }}
+              >
+                {isUploadingPhoto ? (
+                  <>
+                    <Loader2 size={13} className="spin-animation" />
+                    <span>Compressing & Uploading...</span>
+                  </>
+                ) : (
+                  <>
+                    <Upload size={13} />
+                    <span>Upload From Device</span>
+                  </>
+                )}
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  multiple 
+                  disabled={isUploadingPhoto} 
+                  onChange={handleFileUpload} 
+                  style={{ display: "none" }} 
+                />
               </label>
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {formData.images.map((imgUrl, idx) => (
-                <div key={idx} style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                  {imgUrl ? (
-                    <div style={{ position: "relative", width: "44px", height: "44px", flexShrink: 0, borderRadius: "var(--radius-xs)", overflow: "hidden", border: "1.5px solid var(--border-gold)", background: "#f8f5ee" }}>
-                      <img 
-                        src={normalizeImageUrl(imgUrl) || imgUrl} 
-                        alt="Preview" 
-                        referrerPolicy="no-referrer"
-                        onError={(e) => {
-                          e.currentTarget.src = FALLBACK_PRODUCT_IMAGE;
-                        }}
-                        style={{ width: "100%", height: "100%", objectFit: "cover" }} 
+              {formData.images.map((imgUrl, idx) => {
+                const isCloud = typeof imgUrl === "string" && (imgUrl.includes("cloudinary.com") || imgUrl.includes("res.cloudinary.com"));
+                const isLocalBase64 = typeof imgUrl === "string" && imgUrl.startsWith("data:image/");
+
+                return (
+                  <div key={idx} style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                    {imgUrl ? (
+                      <div style={{ position: "relative", width: "44px", height: "44px", flexShrink: 0, borderRadius: "var(--radius-xs)", overflow: "hidden", border: "1.5px solid var(--border-gold)", background: "#f8f5ee" }}>
+                        <img 
+                          src={normalizeImageUrl(imgUrl) || imgUrl} 
+                          alt="Preview" 
+                          referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            e.currentTarget.src = FALLBACK_PRODUCT_IMAGE;
+                          }}
+                          style={{ width: "100%", height: "100%", objectFit: "cover" }} 
+                        />
+                      </div>
+                    ) : (
+                      <div style={{ width: "44px", height: "44px", flexShrink: 0, borderRadius: "var(--radius-xs)", border: "1px dashed var(--border-subtle)", background: "var(--bg-secondary)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
+                        <ImageIcon size={18} />
+                      </div>
+                    )}
+                    <div style={{ flex: 1, display: "flex", alignItems: "center", gap: "6px" }}>
+                      <input
+                        type="url"
+                        placeholder="Paste Image URL (Cloudinary, Drive, Imgur, Unsplash...)"
+                        value={imgUrl}
+                        onChange={(e) => handleImageChange(idx, e.target.value)}
+                        onBlur={(e) => handleImageChange(idx, e.target.value)}
+                        className="input-field"
+                        style={{ flex: 1, fontSize: "0.84rem" }}
                       />
+                      {isCloud && (
+                        <span
+                          title="Hosted on Cloudinary CDN"
+                          style={{
+                            fontSize: "0.68rem",
+                            fontWeight: 700,
+                            padding: "2px 7px",
+                            borderRadius: "10px",
+                            background: "rgba(16, 185, 129, 0.15)",
+                            color: "#10b981",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "3px",
+                            whiteSpace: "nowrap"
+                          }}
+                        >
+                          <Cloud size={10} /> CDN
+                        </span>
+                      )}
+                      {isLocalBase64 && (
+                        <span
+                          title="Local Base64 compressed image"
+                          style={{
+                            fontSize: "0.68rem",
+                            fontWeight: 700,
+                            padding: "2px 7px",
+                            borderRadius: "10px",
+                            background: "rgba(245, 158, 11, 0.15)",
+                            color: "#f59e0b",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "3px",
+                            whiteSpace: "nowrap"
+                          }}
+                        >
+                          Base64
+                        </span>
+                      )}
                     </div>
-                  ) : (
-                    <div style={{ width: "44px", height: "44px", flexShrink: 0, borderRadius: "var(--radius-xs)", border: "1px dashed var(--border-subtle)", background: "var(--bg-secondary)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
-                      <ImageIcon size={18} />
-                    </div>
-                  )}
-                  <input
-                    type="url"
-                    placeholder="Paste Image URL (Google Drive, Imgur, Unsplash, or Direct Web Link)"
-                    value={imgUrl}
-                    onChange={(e) => handleImageChange(idx, e.target.value)}
-                    onBlur={(e) => handleImageChange(idx, e.target.value)}
-                    className="input-field"
-                    style={{ flex: 1, fontSize: "0.84rem" }}
-                  />
-                  {formData.images.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveImageField(idx)}
-                      style={{ background: "transparent", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "6px" }}
-                      title="Remove image"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  )}
-                </div>
-              ))}
+                    {formData.images.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveImageField(idx)}
+                        style={{ background: "transparent", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "6px" }}
+                        title="Remove image"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
 
               <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", justifyContent: "space-between", marginTop: "4px" }}>
                 <button
