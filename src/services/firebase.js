@@ -147,12 +147,14 @@ export const updateStoreVersionMeta = async (updates = {}) => {
   if (!isFirebaseConfigured()) return false;
   const config = getFirebaseConfig();
 
+  const fieldKeys = Object.keys(updates);
+  if (fieldKeys.length === 0) return false;
+
   try {
-    const url = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents/settings/version_meta?${config.apiKey ? `key=${config.apiKey}` : ""}`;
+    const maskQuery = fieldKeys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+    const url = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/(default)/documents/settings/version_meta?${maskQuery}&${config.apiKey ? `key=${config.apiKey}` : ""}`;
     const body = JSON.stringify({
-      fields: toFirestoreFields({
-        ...updates
-      })
+      fields: toFirestoreFields(updates)
     });
 
     const res = await fetch(url, {
@@ -167,6 +169,7 @@ export const updateStoreVersionMeta = async (updates = {}) => {
     return false;
   }
 };
+
 
 // ==========================================
 // 2. Single-Document Catalog Bundle Pattern (Pattern #1)
@@ -272,14 +275,15 @@ export const saveCatalogBundleToCloud = async (products) => {
     });
 
     if (res.ok) {
-      // Update version metadata in background
-      updateStoreVersionMeta({ productsUpdatedAt: nowIso }).catch(() => {});
+      // Update version metadata in background with field mask
+      await updateStoreVersionMeta({ productsUpdatedAt: nowIso }).catch(() => {});
+      return { success: true, updatedAt: nowIso };
     }
 
-    return res.ok;
+    return { success: false };
   } catch (err) {
     console.warn("[SS VASTRA Cloud] saveCatalogBundleToCloud error:", err);
-    return false;
+    return { success: false };
   }
 };
 

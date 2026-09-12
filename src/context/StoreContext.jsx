@@ -50,8 +50,8 @@ export const STORAGE_KEYS = {
   SETTINGS_VERSION: "SETTINGS_VERSION"
 };
 
-// Module-level in-memory timestamp throttling window (2.5 minutes)
-const THROTTLE_WINDOW_MS = 150000;
+// Module-level in-memory timestamp throttling window (15 seconds)
+const THROTTLE_WINDOW_MS = 15000;
 let lastVersionCheckTimestamp = 0;
 let lastOrdersSyncTimestamp = 0;
 
@@ -638,7 +638,7 @@ export const StoreProvider = ({ children }) => {
     if (!isFirebaseConfigured()) return;
     const now = Date.now();
     
-    // In-Memory Session Throttling: reuse cache within 2.5 minutes unless forced
+    // In-Memory Session Throttling: reuse cache within 15 seconds unless forced
     if (!force && now - lastVersionCheckTimestamp < THROTTLE_WINDOW_MS) {
       return;
     }
@@ -647,7 +647,6 @@ export const StoreProvider = ({ children }) => {
     try {
       // Step 1: Version Check (Cost: Exactly 1 Firestore Read)
       const versionMeta = await fetchStoreVersion();
-      if (!versionMeta) return;
 
       const localStoreVersion = localStorage.getItem(STORAGE_KEYS.STORE_VERSION) || localStorage.getItem("STORE_VERSION");
       const localSettingsVersion = localStorage.getItem(STORAGE_KEYS.SETTINGS_VERSION) || localStorage.getItem("SETTINGS_VERSION");
@@ -655,9 +654,18 @@ export const StoreProvider = ({ children }) => {
       const currentProductsSaved = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
       const hasLocalProducts = Boolean(currentProductsSaved && currentProductsSaved !== "[]");
       
-      // Compare version meta: If matched and local products exist, 0 catalog reads!
-      const shouldFetchCatalog = force || !hasLocalProducts || (versionMeta.productsUpdatedAt && versionMeta.productsUpdatedAt !== localStoreVersion);
-      const shouldFetchSettings = force || (versionMeta.settingsUpdatedAt && versionMeta.settingsUpdatedAt !== localSettingsVersion);
+      // Compare version meta: Fetch if forced, or first time on device, or cloud version changed, or no cloud version recorded yet
+      const shouldFetchCatalog = 
+        force || 
+        !hasLocalProducts || 
+        !localStoreVersion || 
+        (versionMeta?.productsUpdatedAt && versionMeta.productsUpdatedAt !== localStoreVersion) ||
+        (!versionMeta?.productsUpdatedAt);
+
+      const shouldFetchSettings = 
+        force || 
+        !localSettingsVersion || 
+        (versionMeta?.settingsUpdatedAt && versionMeta.settingsUpdatedAt !== localSettingsVersion);
 
       const fetchPromises = [];
       if (shouldFetchCatalog) {
@@ -676,29 +684,23 @@ export const StoreProvider = ({ children }) => {
 
       // Update Catalog if fetched
       if (cloudProducts && Array.isArray(cloudProducts) && cloudProducts.length > 0) {
-        setProducts((prev) => {
-          if (JSON.stringify(prev) === JSON.stringify(cloudProducts)) return prev;
-          safeSetStorage(STORAGE_KEYS.PRODUCTS, cloudProducts);
-          return cloudProducts;
-        });
-        if (versionMeta.productsUpdatedAt) {
-          localStorage.setItem(STORAGE_KEYS.STORE_VERSION, versionMeta.productsUpdatedAt);
-          localStorage.setItem("STORE_VERSION", versionMeta.productsUpdatedAt);
-        }
+        setProducts(cloudProducts);
+        safeSetStorage(STORAGE_KEYS.PRODUCTS, cloudProducts);
+        const versionToStore = versionMeta?.productsUpdatedAt || new Date().toISOString();
+        localStorage.setItem(STORAGE_KEYS.STORE_VERSION, versionToStore);
+        localStorage.setItem("STORE_VERSION", versionToStore);
       }
 
       // Update Settings if fetched
       if (cloudSettings && Object.keys(cloudSettings).length > 0) {
         setSettings((prev) => {
           const merged = { ...prev, ...cloudSettings };
-          if (JSON.stringify(prev) === JSON.stringify(merged)) return prev;
           safeSetStorage(STORAGE_KEYS.SETTINGS, merged);
           return merged;
         });
-        if (versionMeta.settingsUpdatedAt) {
-          localStorage.setItem(STORAGE_KEYS.SETTINGS_VERSION, versionMeta.settingsUpdatedAt);
-          localStorage.setItem("SETTINGS_VERSION", versionMeta.settingsUpdatedAt);
-        }
+        const versionToStore = versionMeta?.settingsUpdatedAt || new Date().toISOString();
+        localStorage.setItem(STORAGE_KEYS.SETTINGS_VERSION, versionToStore);
+        localStorage.setItem("SETTINGS_VERSION", versionToStore);
       }
 
       // If Admin is currently active, sync orders with versioning
@@ -794,10 +796,10 @@ export const StoreProvider = ({ children }) => {
   useEffect(() => {
     if (!isFirebaseConfigured()) return;
 
-    // 1. Initial version check on mount
-    syncWithCloud(false);
+    // 1. Initial version check on mount (force=true for immediate sync)
+    syncWithCloud(true);
 
-    // 2. Poll interval for active visible tab (throttled to 2.5 minutes)
+    // 2. Poll interval for active visible tab
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "visible") {
         syncWithCloud(false);
@@ -807,10 +809,10 @@ export const StoreProvider = ({ children }) => {
     // 3. Tab focus / visibility change
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        syncWithCloud(false);
+        syncWithCloud(true);
       }
     };
-    const handleFocus = () => syncWithCloud(false);
+    const handleFocus = () => syncWithCloud(true);
 
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -851,7 +853,12 @@ export const StoreProvider = ({ children }) => {
       const next = [newProduct, ...prev];
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       if (isFirebaseConfigured()) {
-        saveCatalogBundleToCloud(next);
+        saveCatalogBundleToCloud(next).then((res) => {
+          if (res?.updatedAt) {
+            localStorage.setItem(STORAGE_KEYS.STORE_VERSION, res.updatedAt);
+            localStorage.setItem("STORE_VERSION", res.updatedAt);
+          }
+        });
       }
       return next;
     });
@@ -870,7 +877,12 @@ export const StoreProvider = ({ children }) => {
       const next = prev.map((prod) => (prod.id === productId ? { ...prod, ...fields } : prod));
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       if (isFirebaseConfigured()) {
-        saveCatalogBundleToCloud(next);
+        saveCatalogBundleToCloud(next).then((res) => {
+          if (res?.updatedAt) {
+            localStorage.setItem(STORAGE_KEYS.STORE_VERSION, res.updatedAt);
+            localStorage.setItem("STORE_VERSION", res.updatedAt);
+          }
+        });
       }
       return next;
     });
@@ -883,7 +895,12 @@ export const StoreProvider = ({ children }) => {
       const next = prev.filter((prod) => prod.id !== productId);
       safeSetStorage(STORAGE_KEYS.PRODUCTS, next);
       if (isFirebaseConfigured()) {
-        saveCatalogBundleToCloud(next);
+        saveCatalogBundleToCloud(next).then((res) => {
+          if (res?.updatedAt) {
+            localStorage.setItem(STORAGE_KEYS.STORE_VERSION, res.updatedAt);
+            localStorage.setItem("STORE_VERSION", res.updatedAt);
+          }
+        });
       }
       return next;
     });
